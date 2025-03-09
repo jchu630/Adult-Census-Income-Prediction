@@ -3,7 +3,7 @@ Predicting income levels based on census data using machine learning models.
 
 
 ## Project Summary
-In this project, we worked with the Adult Census Income dataset to predict whether an individual earns more than $50K annually. The dataset, originally from the U.S. Census Bureau, contains demographic and financial attributes, such as age, education, capital gains, and hours worked per week. We processed the data, performed exploratory data analysis (EDA), and built several binary classification models (Logistic Regression, LASSO & Ridge Regression, Decision Tree, Random Forests, and XGBoost) using R.
+In this project, we worked with the [Adult Census Income dataset](https://archive.ics.uci.edu/dataset/2/adult) to predict whether an individual earns more than $50K annually. The dataset, originally from the [U.S. Census Bureau](https://www.census.gov/en.html), contains demographic and financial attributes, such as age, education, capital gains, and hours worked per week. We processed the data, performed exploratory data analysis (EDA), and built several binary classification models (Logistic Regression, LASSO & Ridge Regression, Decision Tree, Random Forests, and XGBoost) using R.
 
 ## Key Findings
 - Model Performance: Ensemble methods like Random Forest and XGBoost outperformed simpler models like Logistic Regression and LASSO, with Random Forest achieving a misclassification rate of 13.87% and XGBoost 12.95%. However, these models are more complex and harder to interpret.
