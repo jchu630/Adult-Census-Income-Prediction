@@ -1,0 +1,915 @@
+---
+title: "Adult Census Income"
+author: "Jadon Chu"
+date: "11 Oct 2024"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    number_sections: no
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+# Overview
+
+We will work with the [Adult Census Income dataset](https://archive.ics.uci.edu/dataset/2/adult) to predict whether an individual earns more than \$50K per year. This data was originally extracted from the [1994 Census bureau database](https://www.census.gov/en.html) and was donated to [UCI Machine Learning Data Repository](https://archive.ics.uci.edu/) for research and education purposes.
+
+The [data repository website](https://archive.ics.uci.edu/dataset/2/adult) contains some attribute definitions of the corresponding data sets. Most of the descriptions are self-explanatory. For instance, `sex` represents the gender of a census respondent. However, some are not so intuitive and not included in text. Below is the **additional detailed descriptions** for those attributes.
+
+-   `fnlwgt`: a continuous numeric attribute meaning 'Final Weight'. It indicates the number of people in the population that each record represents, calculated based on demographic characteristics such as age, gender, race, and geographic region. The U.S. Census Bureau uses this attribute to adjust for the survey sampling method to ensure that the data represents the actual population proportions.
+
+-   `education-num`: a continuous variable that assigns a number to each level of education, corresponding to the number of years of education an individual has completed.
+
+-   `capital-gain`': a continuous numeric attribute (in US dollars), referring to income derived from selling assets (e.g., stocks, real estate) at a price higher than the purchase price.
+
+-   `capital-loss`: a continuous numeric attribute (in US dollars), referring to a loss incurred from selling assets at a lower price than the purchase price.
+
+-   `hours-per-week`: a continuous numeric attribute representing how many hours the person typically works each week, providing insight into their work schedule, whether part-time, full-time, or potentially over-time.
+
+In this project, we will process the data, perform exploratory data analysis (EDA), and **build several binary classification models** using R.
+
+```{r setup, include=TRUE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(tidyverse)
+library(ggplot2)
+library(glmnet)
+library(caret)
+library(rpart)
+library(ranger)
+library(xgboost)
+```
+
+# 1. Data Exploration and Processing
+
+### Loading the Data
+
+We will exclude the attribute `nflwgt` as it is a weighting factor for the population, whereas our goal here is to predict the annul income level for each individual.
+
+Loading the `adult.data` and assigning meaningful column names to the data frame: Note that the target response is `income`.
+
+```{r}
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
+
+column_names <- c('age', 'workclass', 'fnlwgt', 'education', 'education_num', 'marital_status', 'occupation', 'relationship', 'race', 'sex', 'capital_gain', 'capital_loss', 'hours_per_week', 'native_country', 'income' )
+
+data <- read_csv(url, col_names = column_names) 
+dim(data) # 15 columns
+
+# Remove the 'fnlwgt' column  
+data <- data[, -which(colnames(data) == "fnlwgt")] 
+dim(data) # 14 columns
+
+glimpse(data)
+```
+
+Note: it was found that the category 'Holand-Netherlands' only has one observation in the data, and the 'adult.test' data set does not contain any observations from this category.
+
+```{r}
+data |> group_by(native_country) |> summarise(n_obs = n()) |> ungroup() |> arrange(n_obs)
+```
+
+To prevent issues when applying our models to the test dataset, we will remove this observation:
+
+```{r}
+data <- data |> 
+  mutate(across(where(is.character), ~ str_trim(.)))  %>% # remove white-space
+  filter(!native_country == 'Holand-Netherlands')
+```
+
+This ensures consistency between the training and test data.
+
+### Addressing Missing Values
+
+What percentage of the data records contains missing values?
+
+```{r}
+# First set-up
+sum(is.na(data)) # NAs? No. But e.g. native-country should have missing values, are they marked as '?'?
+data |> pull(`native_country`) |> unique() # Yes, turn them to NAs for easier handling
+data[data== '?'] <- NA
+sum(is.na(data)) # 4262 NAs
+
+# Calculate % of data records with missing data:
+missing_percentage <- sum(!complete.cases(data)) / nrow(data) * 100
+missing_percentage # 7.37%
+```
+
+The percentage of records with missing values is `r missing_percentage |> round(2)`% (relatively small).
+
+Comparing the proportions of missingness for each income class:
+
+```{r}
+missingness_proportions <- data |>
+  mutate(has_missing = !complete.cases(data)) |>
+  group_by(income) |>
+  count(has_missing)
+missingness_proportions
+```
+
+For the `<=50k` class, the percentage of records with missing values is `r (2066 / 22653 * 100) |> round(2)`% and for the `>50k` class, it is `r (333 / 7508 * 100) |> round(2)`% i.e. the lower-income group has more than 2x the percentage of missing values compared to the higher-income group.
+
+Note that the majority of records in the data set belong to the `<=50k` class:
+
+```{r}
+data |> 
+  group_by(income) |>
+  count()
+```
+
+The number of records in the data set belonging to the `<=50k` class is over 3 times that of the `>50k` class. So the data set is imbalanced.
+
+**Removing the Missing Data**
+
+Removing the missing values in this case is justifiable because they constitute a relatively small proportion of both income classes, so their removal is unlikely to introduce significant bias or distort the overall distribution of the data. Additionally, it helps simplifies the analysis by avoiding the need for imputation methods, which could introduce additional assumptions and potential errors.
+
+Removing just `r sum(!complete.cases(data))` rows:
+
+```{r}
+data_clean <- na.omit(data)
+```
+
+Converting the response into a binary group for classification further on.
+
+```{r}
+data_clean$income <- ifelse(data_clean$income == '<=50K', 0, 1)
+data_clean$income <- as.factor(data_clean$income)
+glimpse(data_clean)
+```
+
+### Exploring the Data
+
+Looking at the distribution of the target response `income`:
+
+```{r, message=FALSE}
+income_summary <- data_clean |>
+  group_by(income) |>
+  count()
+income_summary
+
+```
+
+```{r}
+ggplot(income_summary, aes(x=factor(income), y = n, fill=factor(income))) + 
+  geom_col() +
+  scale_x_discrete(labels = c('<=50K', '>50K')) +
+  labs(title = "Distribution of Income levels", x = "Income", y = "Count", 
+       fill= "Income class") +
+  geom_text(aes(label=n), 
+            position=position_nudge(y=-1000)) +
+  theme_minimal() +
+  scale_fill_manual(values=c("coral", "cyan"), labels = c("<=50K", ">50K"))
+
+```
+
+With missing values removed, the data set is imbalanced with the number of records belonging to the `<=50K` class being 3 times more than that of the `>50K` class in the data set, as observed before.
+
+Exploring some of the variables that may be related to income:
+
+1.  `education` (Education level)
+
+Higher education levels are generally correlated to higher paying jobs.
+
+2.  `hours_per_week` (Hours worked per week)
+
+It makes sense that individuals who work longer hours per week are likely to earn higher incomes.
+
+3.  `occupation`
+
+Different occupations tend to have different salary ranges. For example, professional jobs or management roles tend to be higher paying than service jobs.
+
+Exploring their relationships with income:
+
+**Education Level vs Income**
+
+```{r}
+# Education Level vs Income
+ggplot(data_clean, aes(x = education, fill = factor(income))) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportions of Education Level by Income class", x = "Education Level", y = "Proportion", fill = "Income class") +
+  scale_fill_manual(values = c("coral", "cyan"), labels = c("<=50K", ">50K")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # rotate x-axis labels 
+
+### Look at the number of Education Level for each class separately
+num_edu_over <- data_clean |> 
+  filter(income == 1) |>
+  group_by(education) |>
+  count()
+
+# Show column chart for >50K
+num_edu_over |> 
+  ggplot(aes(x=education, y=n)) +
+  geom_col(fill="cyan") + 
+  geom_text(aes(label=n), 
+            position=position_nudge(y= 100)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="Count of Education Level for >50K class", x="Education Level", y="Count")
+
+# Counts of occupations for <=50K
+num_edu_under <- data_clean |> 
+  filter(income == 0) |>
+  group_by(education) |>
+  count()
+
+# Show column chart for <=50K
+num_edu_under |> 
+  ggplot(aes(x=education, y=n)) +
+  geom_col(fill="coral") + 
+  geom_text(aes(label=n), 
+            position=position_nudge(y= 100)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="Count of Education Level for <=50K class", x="Education Level", y="Count")
+```
+
+Indeed, higher levels of education are positively correlated with income class. A greater proportion of individuals with Doctorate, Masters, or Professional-school education belong to the `>50K` class compared to the `<=50K` class. Most individuals from the `>50K` class have at least a bachelor's degree, while the majority of the `<=50K` class have only a high-school diploma.
+
+We will remove the `education_num` attribute, as it is redundant. Instead, we will retain the `education` attribute, which captures the broader educational categories relevant to income.
+
+```{r}
+# Remove the 'education_num' attribute  
+dim(data_clean) # expect 14 cols
+data_clean <- data_clean[, -which(colnames(data_clean) == "education_num")] 
+dim(data_clean) # expect 13 cols
+```
+
+**Hours per week vs Income**
+
+Let's first look at the distribution, then compare between the two classes.
+
+```{r}
+# First, checking the range of values for Hours per week
+range(data_clean$hours_per_week) # It is unusual for an individual to work 99 hours
+hpw_summary <- data_clean |>
+  group_by(hours_per_week) |>
+  count()
+
+# Distribution of Hours per week
+hpw_summary |> 
+  ggplot(aes(x=hours_per_week, y=n)) +
+  geom_col() + 
+  labs(title="Distribution of Hours per week", x="Hours per week", y="Count") +
+  theme_minimal() +
+  scale_x_continuous(breaks=seq(0, 100, 10))
+
+# Comparing between the two groups using a Density plot
+data_clean |> 
+  ggplot() +
+  geom_density(aes(x=hours_per_week,  
+                   fill = factor(income)), 
+               alpha=0.5) + 
+  theme_minimal() +
+  scale_fill_manual(values=c("coral", "cyan"), labels = c("<=50K", ">50K")) +
+  labs(title = "Distribution of Hours per week", x="Hours per week", fill="Income class") +
+  scale_x_continuous(breaks=seq(0, 100, 10))
+
+# Comparing between the two groups with a Box plot
+ggplot(data_clean, aes(x=factor(income), y=hours_per_week, fill=factor(income))) +
+  geom_boxplot() + 
+  labs(title="Income vs Hours per week", x="Income class", y="Hours per week",
+       fill="Income class") +
+  theme_minimal() + 
+  scale_x_discrete(labels = c('<=50K', '>50K')) +
+  scale_fill_manual(values=c("coral", "cyan"), labels = c("<=50K", ">50K"))
+              
+```
+
+There are 89 individuals who work 98 or 99 hours per week which is very unusual since this would mean that they work at least 14 hours every single day. Overall, most individuals work 40 hours per week for both income classes. The density plot provides additional detail, showing that individuals in the `>50K` class are more likely to work between 40-60 hours (i.e. overtime). This suggests that there is a correlation between working longer hours and earning higher income. The `<=50K` class appears to have more variability, with individuals working both part-time and full-time. The box plot further supports that higher income is associated not only with working full-time but also with working overtime. The `<=50K` class has a narrower IQR, indicating that most individuals in this class work around 40 hours, with fewer outliers in terms of overtime or part-time work. However, we can see that the hours per week for individuals in this class range over the entire scale (0 to 99 hours).
+
+**Occupation vs Income**
+
+```{r}
+# Occupation vs Income
+ggplot(data_clean, aes(x = occupation, fill = factor(income))) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportions of occupations by Income class", x = "Occupation", y = "Proportion", fill = "Income class") +
+  scale_fill_manual(values = c("coral", "cyan"), labels = c("<=50K", ">50K")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # rotate x-axis labels 
+
+### Look at the number of occupations for each class separately
+num_occupations_over <- data_clean |> 
+  filter(income == 1) |>
+  group_by(occupation) |>
+  count()
+
+# Show column chart for >50K
+num_occupations_over |> 
+  ggplot(aes(x=occupation, y=n)) +
+  geom_col(fill="cyan") + 
+  geom_text(aes(label=n), 
+            position=position_nudge(y= 100)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="Count of Occupations for >50K class", x="Occupation", y="Count")
+
+# Counts of occupations for <=50K
+num_occupations_under <- data_clean |> 
+  filter(income == 0) |>
+  group_by(occupation) |>
+  count()
+
+# Show column chart for <=50K
+num_occupations_under |> 
+  ggplot(aes(x=occupation, y=n)) +
+  geom_col(fill="coral") + 
+  geom_text(aes(label=n), 
+            position=position_nudge(y= 100)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title="Count of Occupations for <=50K class", x="Occupation", y="Count")
+```
+
+Of individuals who earn more than 50K, they are most likely to be in occupations like `Exec-managerial` or `Prof-specialty`, in-fact, their proportions are just about half with the `<=50K` class i.e. if an individual's occupation are one of the two, then he/she is quite likely to earn more than 50K considering most people earn less than that. In contrast, occupations like `Handlers-cleaners`, `priv-house-serv`, and `other-service` are largely dominated by individuals earning less than 50K.
+
+Let's briefly look at the relationships of other variables with `income`:
+
+**Age vs Income**
+
+```{r}
+# Age vs Income
+ggplot(data_clean, aes(x=factor(income), y=age, fill=factor(income))) +
+  geom_boxplot() + 
+  labs(title="Income vs Age", x="Income class", y="Age",
+       fill="Income class") +
+  theme_minimal() + 
+  scale_x_discrete(labels = c('<=50K', '>50K')) +
+  scale_fill_manual(values=c("coral", "cyan"), labels = c("<=50K", ">50K"))
+```
+
+Age is positively correlated with income, this makes sense as individuals who are older tend to earn more.
+
+**Gender vs Income**
+
+```{r}
+# Gender vs Income
+ggplot(data_clean, aes(x = sex, fill = factor(income))) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportions of Gender by Income class", x = "Gender", y = "Proportion", fill = "Income class") +
+  scale_fill_manual(values = c("coral", "cyan"), labels = c("<=50K", ">50K")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # rotate x-axis labels 
+```
+
+**Marital Status vs Income**
+
+```{r}
+# Marital status vs Income
+ggplot(data_clean, aes(x = marital_status, fill = factor(income))) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportions of Marital Status by Income class", x = "Marital Status", y = "Proportion", fill = "Income class") +
+  scale_fill_manual(values = c("coral", "cyan"), labels = c("<=50K", ">50K")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # rotate x-axis labels 
+```
+
+Gender and marital status show potential disparities in income, as men and married individuals are more likely to earn higher incomes.
+
+**Race vs Income**
+
+```{r}
+# Race vs Income
+ggplot(data_clean, aes(x = race, fill = factor(income))) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportions of Race by Income class", x = "Race", y = "Proportion", fill = "Income class") +
+  scale_fill_manual(values = c("coral", "cyan"), labels = c("<=50K", ">50K")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # rotate x-axis labels 
+```
+
+Race and income show some disparity, with certain racial groups earning more than others.
+
+Out of interest, let's look at the data of individuals working 98-99 hours per week:
+
+```{r}
+atleast_98hours <- data_clean |>
+  filter(hours_per_week >= 98)
+atleast_98hours
+```
+
+Based on this filtered data, the variables that stand out are `age` (generally middle-aged to older), `occupation`, and `marital_status`, `relationship`, `race`, `sex` i.e. white married husbands. Looking at the occupations by income:
+
+```{r}
+# group variables
+occupation_byincome_98 <- atleast_98hours |> 
+  group_by(occupation, income) |>
+  count() 
+  
+ # make column chart
+occupation_byincome_98 |>
+  ggplot(aes(x = occupation, y = n, fill = factor(income))) +  # Treat income as a factor for distinct colors
+  geom_col() + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +  # Rotate x-axis labels for readability
+  labs(title = "Occupations by Income for Individuals Working 98-99 Hours",
+       x = "Occupation", y = "Count", fill = "Income") +       # Adjust labels
+  scale_fill_manual(values = c("coral", "cyan"),               # Use different colors for 0 and 1
+                    labels = c("<=50K", ">50K"))
+
+```
+
+The variety of occupations have reduced and the proportion of individuals earning `>50K` is higher in this subset. While it's possible that such long hours might result from data-entry errors, another plausible explanation could be that those in the \>50K income bracket may hold jobs that require them to live on-site, earning income even during periods of rest. For the `<=50K` group, given that many of these individuals appear to be married men, the need to work long hours may be driven by the necessity to support their families. Though this raises interesting points, we will not delve deeper into these possibilities for now.
+
+**Interaction terms:**
+
+Including interaction terms could improve the predictive power of the model.
+
+A possible interaction is between `hours_per_week` and `age`. As observed before, high earners tend to work more hours per week, particularly in their middle age, whereas, younger individuals are more likely to earn less, even if they work more hours.
+
+```{r}
+data_clean %>% ggplot(., aes(x = age, y = hours_per_week, color = income)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Age vs Hours Worked per Week by Income", x = "Age", y = "Hours Worked per Week") +
+  theme_minimal()
+```
+
+We can confirm whether or not this interaction is significant when we build the Logistic Regression model.
+
+# 2. Modelling
+
+We will build the following models on the `adult.data` with (converted) `income` as the response:
+
+-   Logistic Regression with `glm`
+
+-   Regularised Regression (Ridge and LASSO)
+
+-   Decision Tree
+
+-   Random Forest
+
+-   XGBoost
+
+### 1. Logistic Regression model
+
+First, fitting the full-model:
+
+```{r}
+set.seed(123)  # reproducibility
+
+# Fit full glm model incl. interaction term
+logistic_model <- glm(income ~ ., 
+                      data = data_clean, 
+                      family = 'binomial')
+summary(logistic_model)
+```
+
+The predictors `age`, `capital_gain`, `capital_loss`, and `hours_per_week` are (highly) significant. The following predictors have levels that are significant: `workclass`, `education`, `marital_status`, `occupation`, `relationship`, `race`, `sex` and `native_country`. So we will keep these predictors for the logistic regression.
+
+We will also include the interaction between `age` and `hours_per_week`.
+
+```{r}
+# Refined logistic model
+refined_model <- glm(income ~ age*hours_per_week + workclass + education + marital_status + occupation + relationship + race + sex + capital_gain + capital_loss + native_country, 
+                     data = data_clean, 
+                     family = 'binomial')
+
+# Check ANOVA test
+anova(logistic_model, refined_model, test = 'Chisq') # significant p-value
+
+# Final logistic model
+summary(refined_model) # Lower AIC (19685) than the full model (19692)
+```
+
+### 2.1 LASSO Regularised Regression
+
+```{r}
+set.seed(123)
+
+# Define X matrix and y vector
+X <- model.matrix(income~. -1 + age*hours_per_week, data = data_clean) # -1 => remove intercept
+y <- as.numeric(as.character(data_clean$income))
+
+cv_lasso <- cv.glmnet(X, y, alpha = 1, family = 'binomial', type.measure = 'class')
+plot(cv_lasso); title('CV curve for LASSO', line = 2)
+
+# find optimal lambda
+opt_lambda <- cv_lasso$lambda.min
+lasso_model <- cv_lasso$glmnet.fit # glmnet(x = X, y = y, alpha = 1, family = "binomial") 
+
+# Extract coefficients
+lasso_betas <- as.matrix(coef(lasso_model, s = opt_lambda))
+n_lasso_betas <- sum(lasso_betas != 0)
+
+cat("Optimal lambda:", opt_lambda, "\n")
+cat("Number of non-zero coefficients:", n_lasso_betas, "\n")
+
+```
+
+### 2.2 Ridge Regression
+
+We expect most of the variables to be related to `income`, so instead of doing variable selection, we can retain all and let Ridge do shrinkage.
+
+```{r}
+set.seed(123)
+
+#X <- model.matrix(income~. -1 + age*hours_per_week, data = data_clean) # -1 => remove intercept
+#y <- as.numeric(as.character(data_clean$income))
+
+cv_ridge <- cv.glmnet(X, y, alpha = 0, family = 'binomial', type.measure = 'class')
+plot(cv_ridge); title('CV curve for Ridge Regression', line = 2)
+
+# Find the optimal lambda and fit to model
+opt_lambda_ridge <- cv_ridge$lambda.min
+ridge_model <- cv_ridge$glmnet.fit #glmnet(X, y, alpha = 0, lambda = opt_lambda_ridge)
+
+# Extract coefficients
+ridge_betas <- as.matrix(coef(ridge_model, s = opt_lambda_ridge))
+n_ridge_betas <- sum(ridge_betas != 0)
+
+cat("Optimal lambda for Ridge:", opt_lambda_ridge, "\n")
+cat("Number of non-zero coefficients in Ridge:", n_ridge_betas, "\n")
+
+```
+
+Note that Ridge retains all predictors by shrinking their coefficients toward zero, whereas LASSO selectively shrinks some coefficients to exactly zero, effectively performing feature selection.
+
+### 3. Decision Tree
+
+Note that decision trees handle interactions implicitly through recursive splitting.
+
+```{r}
+set.seed(123)
+
+# Fit tree
+decision_tree <- rpart(income ~ ., data = data_clean, method = "class") # classification
+decision_tree
+printcp(decision_tree) # Choose CP = 0.010000 (4 splits)
+
+# Prune tree
+optimal_cp <- 0.010000 
+pruned_tree <- prune(decision_tree, cp=optimal_cp)
+plot(pruned_tree, margin=0.03); text(pruned_tree, cex=0.8)
+
+```
+
+The decision tree has the best predictive ability when it has 4 splits as shown above.
+
+### 4. Random Forest
+
+Note that Random Forests and XGBoost (ensemble methods) are based on decision trees, so they capture interactions implicitly through their tree-building process (the difference is the training process:
+
+-   RFs builds each tree independently and use the majority vote or average across trees to make predictions =\> final model is an aggregate of all the tree's results
+
+-   XGBoost builds trees sequentially, where each tree focuses on the errors (residuals) of the previous trees).
+
+```{r}
+set.seed(123)
+# Optimize mtry: balances bias-variance tradeoff and minimizes Out-Of-Bag error. 
+mtrys <- c(1, 2,3, 4, 5, 8, 11)
+
+# initialize array
+forests <- vector('list', length(mtrys))
+
+# Loop through each mtry value and grow forests, just keep the OOB error
+for (i in seq_along(mtrys)) {
+  forest <- ranger(income ~ .,
+                        data=data_clean,
+                        num.trees = 500,
+                        mtry=mtrys[i],
+                        min.node.size = 15 # categorical
+                        )
+  forests[[i]] <- forest
+}
+
+# Get OOB errors first
+oob_error_mtry <- vector('numeric', length(forests))
+
+for (i in seq_along(oob_error_mtry)) {
+  oob_error_mtry[i] <- forests[[i]]$prediction.error
+}
+oob_error_mtry
+
+# Make into data frame for set-up
+dataframe_mtry <- data.frame(mtry = mtrys, OOB_error = oob_error_mtry)
+
+# Plot
+ggplot(dataframe_mtry) +
+  geom_line(aes(x=mtry, y=OOB_error)) +
+  geom_point(aes(x=mtry, y=OOB_error)) +
+  scale_x_continuous(breaks = mtrys) +
+  theme_minimal()
+
+
+```
+
+The mtry value with the lowest OOB error is 3.
+
+```{r}
+# Fit Random Forest model
+random_forest <- ranger(income ~ .,
+                      data=data_clean,
+                      num.trees = 500, # 500 trees is sufficient
+                      mtry=3,
+                      min.node.size = 15, # categorical (30,000 observations, avoid overfitting)
+                      importance = 'impurity',
+                      )
+print(random_forest)
+print(sort(random_forest$variable.importance, decreasing = TRUE)) # Order of predictor importance 
+
+```
+
+The most important predictors are shown above according to the Random Forest model. These are all valid predictors and their effect on `income` makes sense. The top 3 are `capital_gain`, `relationship`, and `age` (the highlighted predictors we mentioned that would be related to `income` in the Data Exploration section (`education`, `hours_per_week`, and `occupation`) are actually the next three most important).
+
+### 5. XGBoost
+
+```{r}
+set.seed(123)
+
+# Prepare data for XGBoost
+X_mat <- model.matrix(income ~ . -1 + age*hours_per_week, data = data_clean) # exclude intercept
+y_label <- as.numeric(as.character(data_clean$income)) # convert factor back to numeric
+
+# Convert to DMatrix format (required by XGBoost)
+dtrain <- xgb.DMatrix(data = X_mat, label = y_label)
+
+# Define parameters for XGBoost
+params <- list(
+  objective = "binary:logistic", # binary classification
+  eval_metric = "error", # error rate
+  max_depth = 6, # max depth of trees (try 4-10, shallower trees generalize better, deeper trees => more complex patterns)
+  eta = 0.15, # learning rate (experiment with 0.01 to 0.2)
+  gamma = 0.1, # min loss reduction (try 0, 0.1, 0.2: higher => simpler)
+  colsample_bytree = 0.7, # fraction of features to be randomly sampled for each tree, higher => more complex (try 0.5-0.9)
+  subsample = 0.7 # fraction of data to be randomly sampled for each tree (try 0.6-1)
+)
+
+# Perform cross-validation to find the optimal number of rounds (trees)
+cv_xgb <- xgb.cv(
+  params = params, 
+  data = dtrain, 
+  nrounds = 100, # maximum number of boosting iterations
+  nfold = 10, # 10-fold cross-validation
+  verbose = TRUE, # display training process
+  early_stopping_rounds = 10 # stop if no improvement in 10 rounds
+)
+
+# Get best number of rounds (trees) based on cross-validation
+best_nrounds <- cv_xgb$best_iteration
+
+# Train final XGBoost model with optimal number of rounds
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds
+)
+
+```
+
+```{r}
+# Get feature importance
+importance <- xgb.importance(model = xgb_model)
+importance
+
+# Plot feature importance
+xgb.plot.importance(importance)
+
+print(xgb_model)
+```
+
+The predictors are shown above and are ordered by importance by the XGBoost model. The predictors that are the most important according to the model are all valid and make sense as discussed in the Data Exploration section from before.
+
+# 3. Performance Evaluation
+
+### Load adult.test and Modify
+
+```{r}
+url_test <- "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.test"
+
+# Load Data
+adult_test <- read_csv(url_test, skip = 1, # skip the first line
+                       col_names = column_names) 
+dim(adult_test) # 15 columns
+
+# Remove 'fnlwgt' and 'education_num' columns
+adult_test <- adult_test[, -which(colnames(adult_test) %in% c("fnlwgt", "education_num"))] 
+dim(adult_test) # should be 13 columns
+
+# Check all column names are the same as the training data
+all(colnames(adult_test) == colnames(data_clean)) # TRUE
+
+
+# Remove NAs
+adult_test[adult_test== '?'] <- NA
+sum(is.na(adult_test)) # 2203 NAs
+adult_test <- na.omit(adult_test)
+any(is.na(adult_test)) # no more NAs 
+
+# convert response to binary factor
+adult_test$income <- ifelse(adult_test$income == '<=50K.', 0, 1)
+adult_test$income <- as.factor(adult_test$income)
+head(adult_test)
+
+# Show distribution of each class
+income_summary_test <- adult_test |>
+  group_by(income) |>
+  count()
+
+ggplot(income_summary_test, aes(x=factor(income), y = n, fill=factor(income))) + 
+  geom_col() +
+  scale_x_discrete(labels = c('<=50K', '>50K')) +
+  labs(title = "Distribution of Income levels", x = "Income", y = "Count", 
+       fill= "Income class") +
+  geom_text(aes(label=n), 
+            position=position_nudge(y=-1000)) +
+  theme_minimal() +
+  scale_fill_manual(values=c("coral", "cyan"), labels = c("<=50K", ">50K"))
+
+
+```
+
+The classes are imbalanced as expected.
+
+### Testing the Models
+
+Using the `confusionMatrix()` function from the `caret` package.
+
+```{r}
+# Prepare test data (include interaction term that was included in X)
+X_test <- model.matrix(income~. -1 + age*hours_per_week, data=adult_test)  # exclude intercept
+
+# Check number of cols in X_test is the same as X
+ncol(X_test) == ncol(X)
+
+# Check feature names are the same
+setdiff(colnames(X_test), colnames(X)) # expect 0
+setdiff(colnames(X), colnames(X_test)) # expect 0
+
+
+y_test <- adult_test$income
+```
+
+### Logistic Regression
+
+```{r}
+# Predict for Logistic Regression
+logistic_pred <- predict(refined_model, newdata = adult_test, type = "response")
+logistic_pred_class <- as.factor(ifelse(logistic_pred > 0.5, 1, 0)) # binary
+logistic_cm <- confusionMatrix(logistic_pred_class, y_test) # confusion matrix
+print(logistic_cm) # Accuracy = 84.66%
+logistic_cm_miss <- 1 - logistic_cm$overall["Accuracy"] # miss-rate
+names(logistic_cm_miss) <- "Logistic Regression Misclassification rate"
+print(logistic_cm_miss)
+```
+
+### LASSO Regression
+
+```{r}
+# Make predictions 
+lasso_pred_prob <- predict(lasso_model, newx = X_test, s = opt_lambda, type = "response")
+
+# Adjust to optimize accuracy (inefficient)
+lasso_pred_class <- as.factor(ifelse(lasso_pred_prob > .5, 1, 0))
+
+lasso_cm <- confusionMatrix(lasso_pred_class, as.factor(y_test)) # confusion matrix
+print(lasso_cm)
+
+# Calculate and print the miss-classification rate
+lasso_miss <- 1 - lasso_cm$overall["Accuracy"] 
+names(lasso_miss) <- "LASSO Misclassification rate"
+print(lasso_miss)
+```
+
+### Ridge Regression
+
+```{r}
+# Make predictions on the test set
+ridge_pred_prob <- predict(ridge_model, newx = X_test, s = opt_lambda_ridge, type = "response")
+#ridge_pred_prob <- 1 / (1 + exp(-ridge_pred_prob))  # Logistic scaling
+
+# adjust threshold for optimization (inefficient)
+ridge_pred_class <- as.factor(ifelse(ridge_pred_prob > 0.5, 1, 0))
+
+ridge_cm <- confusionMatrix(ridge_pred_class, as.factor(y_test)) # confusion matrix
+
+print(ridge_cm)
+
+# Calculate and print the misclassification rate
+ridge_miss <- 1 - ridge_cm$overall["Accuracy"]
+names(ridge_miss) <- "Ridge Misclassification rate"
+print(ridge_miss)
+
+```
+
+### Decision Tree
+
+```{r}
+tree_pred <- predict(pruned_tree, newdata = adult_test, type = "class") # predict
+tree_cm <- confusionMatrix(tree_pred, y_test) # confusion matrix
+print(tree_cm) # Accuracy = 83.9%
+tree_miss <- 1 - tree_cm$overall["Accuracy"] 
+names(tree_miss) <- "Decision Tree Misclassification rate"
+print(tree_miss)
+```
+
+### Random Forest
+
+```{r}
+rf_pred <- predict(random_forest, data = adult_test)$predictions # predict
+rf_cm <- confusionMatrix(rf_pred, y_test) # confusion matrix
+print(rf_cm) # Accuracy = 86.13%
+rf_miss <- 1 - rf_cm$overall["Accuracy"]
+names(rf_miss) <- 'RF Misclassification rate'
+print(rf_miss)
+
+```
+
+### XGBoost
+
+```{r}
+xgb_pred <- predict(xgb_model, newdata = xgb.DMatrix(data = X_test)) # predict
+xgb_pred_class <- as.factor(ifelse(xgb_pred > 0.5, 1, 0)) # to binary
+xgb_cm <- confusionMatrix(xgb_pred_class, y_test) # confusion matrix
+print(xgb_cm)
+xgb_misclassification <- 1 - xgb_cm$overall["Accuracy"]
+names(xgb_misclassification) <- 'XGBoost Misclassification rate'
+print(xgb_misclassification)
+```
+
+### Summary Table
+
+```{r}
+# Function to extract performance metrics from confusion matrix
+get_performance_metrics <- function(cm) {
+  accuracy <- paste0(round(cm$overall["Accuracy"] * 100, 2), '%')
+  misclassification_rate <- paste0(round((1 - cm$overall["Accuracy"]) * 100, 2), '%')
+  sensitivity <- paste0(round(cm$byClass["Sensitivity"] * 100, 2), '%')
+  specificity <- paste0(round(cm$byClass["Specificity"] * 100, 2), '%')
+  return(c(accuracy, misclassification_rate, sensitivity, specificity))
+}
+
+# Create an empty data frame to store model performance metrics
+model_performance_df <- data.frame(
+  Model = c("Logistic Regression", "LASSO", "Ridge", "Decision Tree", "Random Forest", "XGBoost"),
+  Accuracy = numeric(3),
+  Misclassification_Rate = numeric(3),
+  Sensitivity = numeric(3),
+  Specificity = numeric(3)
+)
+
+# Calculate metrics for Logistic Regression
+logistic_cm <- confusionMatrix(logistic_pred_class, y_test)
+logistic_metrics <- get_performance_metrics(logistic_cm)
+model_performance_df[1, 2:5] <- logistic_metrics
+
+# Calculate metrics for LASSO
+lasso_cm <- confusionMatrix(lasso_pred_class, as.factor(y_test))
+lasso_metrics <- get_performance_metrics(lasso_cm)
+model_performance_df[2, 2:5] <- lasso_metrics
+
+# Calculate metrics for Ridge
+ridge_cm <- confusionMatrix(ridge_pred_class, as.factor(y_test))
+ridge_metrics <- get_performance_metrics(ridge_cm)
+model_performance_df[3, 2:5] <- ridge_metrics
+
+# Calculate metrics for Decision Tree
+tree_cm <- confusionMatrix(tree_pred, y_test)
+tree_metrics <- get_performance_metrics(tree_cm)
+model_performance_df[4, 2:5] <- tree_metrics
+
+# Calculate metrics for Random Forest
+rf_cm <- confusionMatrix(rf_pred, y_test)
+rf_metrics <- get_performance_metrics(rf_cm)
+model_performance_df[5, 2:5] <- rf_metrics
+
+# Calculate metrics for XGBoost
+xgb_cm <- confusionMatrix(xgb_pred_class, y_test)
+xgb_metrics <- get_performance_metrics(xgb_cm)
+model_performance_df[6, 2:5] <- xgb_metrics
+
+# Print the performance summary table
+print(model_performance_df)
+
+```
+
+# Conclusion
+
+**Performance:**
+
+-   By comparing the misclassification rates, the ensemble methods (Random Forest and XGBoost) show a slight performance advantage, with Random Forest having a misclassification rate of 13.87% and XGBoost at 12.95%, outperforming the simpler models. However, these ensemble methods are more complex and considered "black-box" models, making them harder to interpret compared to simpler models like Logistic Regression (glm) and LASSO (glmnet). The complexity of ensemble methods may be a trade-off for the interpretability of more straightforward models.
+
+**Misclassification rate justification:**
+
+-   Due to the imbalanced nature of the data, the misclassification rate is not a reliable performance metric, particularly when false positives (FP) and false negatives (FN) have different costs. A model that predominantly predicts the majority class can still achieve a low misclassification rate simply because most predictions will be correct, yet it may fail to accurately classify the minority class.
+
+-   In this case, all models exhibit high sensitivity (true positive rate), with scores exceeding 90%. However, their specificity (true negative rate) is notably lower, ranging from 50.35% to 65.51%. This suggests that while the models effectively identify individuals in the '\<=50K' class, they struggle to correctly classify individuals in the '\>50K' class. Consequently, the misclassification rate can be misleading, especially if the minority class is a primary focus of the analysis.
+
+**Better Metrics for Imbalanced Data**
+
+-   *Precision* and *Recall*: Instead of relying solely on the misclassification rate, it is better to use metrics that account for the performance of both classes, particularly the minority class. *Precision* $\frac{TP}{TP + FP}$ is useful when the cost of false positives (FP) is high and *Recall* $\frac{TP}{TP + FN}$ is useful when the cost of false negatives (FN) is high.
+
+-   F1-score balances precision and recall and is useful to ensure that both false positives and false negatives are considered in the evaluation.
+
+-   We can consider the Area Under the ROC Curve (AUC-ROC) as a performance metric. The ROC curve plots recall (sensitivity) against the false positive rate (1 - specificity), and the AUC provides a single score that reflects the model's ability to distinguish between classes. This is particularly useful for imbalanced datasets, as it captures the trade-off between sensitivity and specificity. For instance, if correctly identifying high-income earners is the priority, increasing specificity (correctly rejecting low-income earners) will reduce false positives but may also lower sensitivity, meaning fewer actual high-income earners are identified.
+
+### Comments
+
+We can further explore the predictive capabilities of each model by fine-tuning them to perform well even on imbalanced data. Additionally, we can evaluate them using more meaningful and context-appropriate metrics.
+
+Personally, the key takeaways from this project were building and optimizing various machine learning models, refining them for better predictive performance, and recognizing that misclassification rate is not the sole evaluation metric---other, more realistic measures may provide a better assessment of model effectiveness.
+
+#### EOF
