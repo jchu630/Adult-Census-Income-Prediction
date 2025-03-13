@@ -1,7 +1,7 @@
 # Adult-Census-Income-Prediction
 Predicting income levels based on census data using various machine learning models.
 
-[See Markdown](https://jchu630.github.io/Adult-Census-Income-Prediction/Adult_Census_Income.html)
+[Adult Census Income Prediction](https://jchu630.github.io/Adult-Census-Income-Prediction/Adult_Census_Income.html)
 
 ## Project Rundown
 In this project, we will work with the [Adult Census Income dataset](https://archive.ics.uci.edu/dataset/2/adult) to predict whether an individual earns more than $50K annually. The dataset, originally from the [U.S. Census Bureau](https://www.census.gov/en.html), contains demographic and financial attributes, such as age, education, capital gains, and hours worked per week. We will process the data, perform exploratory data analysis (EDA), and build several binary classification models (Logistic Regression, LASSO & Ridge Regression, Decision Tree, Random Forests, and XGBoost) using R.
