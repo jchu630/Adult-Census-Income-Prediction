@@ -1,5 +1,5 @@
 # Adult-Census-Income-Prediction
-Predicting income levels based on census data using machine learning models.
+Predicting income levels based on census data using various machine learning models.
 
 [See Markdown](https://jchu630.github.io/Adult-Census-Income-Prediction/Adult_Census_Income.html)
 
