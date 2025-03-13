@@ -9,6 +9,6 @@ In this project, we will work with the [Adult Census Income dataset](https://arc
 ## Key Findings
 - Model Performance: Ensemble methods like Random Forest and XGBoost outperformed simpler models like Logistic Regression and LASSO, with Random Forest achieving a misclassification rate of 14.06% and XGBoost 12.95% (85.94% and 87.05% accuracy, respectively).
 
-- Misclassification Rate Limitation: Given the imbalanced data, the misclassification rate is not a reliable metric. While models show high sensitivity (>90%), their specificity is lower, meaning they struggle to correctly classify individuals in the high-income class (>50K).
+- Misclassification Rate Limitation: However, given the imbalanced data, the misclassification rate is not a reliable metric. While models show high sensitivity (>90%), their specificity is lower, meaning they struggle to correctly classify individuals in the high-income class (>50K).
 
 - Better Metrics for Imbalanced Data: We recommend using Precision, Recall, F1-score, and AUC-ROC as more effective metrics, as they account for both the minority class and the trade-offs between false positives and false negatives.
